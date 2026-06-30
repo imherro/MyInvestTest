@@ -274,7 +274,11 @@ function drawLine(points, x, y, color, width) {
   ctx.stroke();
 }
 
-function drawSegmentLabels(points, x, y, plotTop, plotBottom) {
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function drawSegmentLabels(points, x, y, plotLeft, plotRight, plotTop, plotBottom) {
   if (points.length < 2) return;
   ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
   ctx.textAlign = "center";
@@ -288,33 +292,36 @@ function drawSegmentLabels(points, x, y, plotTop, plotBottom) {
     const toPoint = points[index];
     const change = (toPoint.close / fromPoint.close - 1) * 100;
     const label = formatSegmentChange(fromPoint, toPoint);
-    const x1 = x(fromPoint.time);
-    const y1 = y(fromPoint.close);
-    const x2 = x(toPoint.time);
-    const y2 = y(toPoint.close);
-    const xx = (x1 + x2) / 2;
-    const midY = (y1 + y2) / 2;
+    const anchorX = x(toPoint.time);
+    const anchorY = y(toPoint.close);
     const textWidth = ctx.measureText(label).width;
     const padX = 6;
     const boxW = textWidth + padX * 2;
     const boxH = 20;
     const direction = change >= 0 ? -1 : 1;
-    const offsets = [12, 34, -12, 56, -34, 78, -56].map((value) => value * direction);
-    let yy = midY + offsets[0];
+    const yOffsets = [26, 48, 70, 92, 114, 136, 158].map((value) => value * direction);
+    const xOffsets = [0, -44, 44, -88, 88, -132, 132];
+    let xx = clamp(anchorX, plotLeft + boxW / 2, plotRight - boxW / 2);
+    let yy = clamp(anchorY + yOffsets[0], plotTop + boxH / 2, plotBottom - boxH / 2);
     let chosenBox = null;
-    for (const offset of offsets) {
-      const candidateY = Math.max(plotTop + boxH / 2, Math.min(plotBottom - boxH / 2, midY + offset));
-      const box = {
-        left: xx - boxW / 2 - 2,
-        right: xx + boxW / 2 + 2,
-        top: candidateY - boxH / 2 - 2,
-        bottom: candidateY + boxH / 2 + 2,
-      };
-      if (!overlaps(box)) {
-        yy = candidateY;
-        chosenBox = box;
-        break;
+    for (const yOffset of yOffsets) {
+      for (const xOffset of xOffsets) {
+        const candidateX = clamp(anchorX + xOffset, plotLeft + boxW / 2, plotRight - boxW / 2);
+        const candidateY = clamp(anchorY + yOffset, plotTop + boxH / 2, plotBottom - boxH / 2);
+        const box = {
+          left: candidateX - boxW / 2 - 3,
+          right: candidateX + boxW / 2 + 3,
+          top: candidateY - boxH / 2 - 2,
+          bottom: candidateY + boxH / 2 + 2,
+        };
+        if (!overlaps(box)) {
+          xx = candidateX;
+          yy = candidateY;
+          chosenBox = box;
+          break;
+        }
       }
+      if (chosenBox) break;
     }
     if (!chosenBox) {
       chosenBox = {
@@ -409,7 +416,7 @@ function draw(activeTime = null) {
 
   drawLine(payload.points, x, y, "#1f7a68", 2.2);
   drawLine(payload.turningPoints, x, y, "#3d4752", 1.6);
-  drawSegmentLabels(payload.turningPoints, x, y, margin.top, height - margin.bottom);
+  drawSegmentLabels(payload.turningPoints, x, y, margin.left, width - margin.right, margin.top, height - margin.bottom);
   drawTurningMarkers(payload.turningPoints, x, y);
 
   if (activeTime !== null) {
