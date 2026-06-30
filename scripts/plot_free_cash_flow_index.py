@@ -17,7 +17,7 @@ import tushare as ts
 
 TODAY = datetime.now().strftime("%Y%m%d")
 
-DEFAULT_CODES = ("932365.CSI", "980092.CNI")
+DEFAULT_CODES = ("932365.CSI", "480092.CNI")
 KNOWN_INDEXES = {
     "932365.CSI": {
         "name": "中证全指自由现金流指数",
@@ -26,19 +26,19 @@ KNOWN_INDEXES = {
         "publisher": "中证指数有限公司",
         "preferred_source": "tushare",
     },
-    "980092.CNI": {
-        "name": "国证自由现金流指数",
+    "480092.CNI": {
+        "name": "国证自由现金流全收益指数",
         "market": "CNI",
         "base_date": "20121231",
         "publisher": "深圳证券信息有限公司",
         "preferred_source": "cnindex",
-        "cnindex_code": "980092",
+        "cnindex_code": "480092",
     },
 }
 
 COLORS = {
     "932365.CSI": "#1f7a68",
-    "980092.CNI": "#b14b36",
+    "480092.CNI": "#b14b36",
 }
 
 
@@ -309,6 +309,7 @@ def write_html(series_list: list[IndexSeries], output_path: Path) -> None:
     payload = build_chart_payload(series_list)
     all_start = min(item["first"]["trade_date"] for item in payload["series"])
     all_end = max(item["last"]["trade_date"] for item in payload["series"])
+    subtitle_names = " 与 ".join(f"{series.name}（{series.code}）" for series in series_list)
 
     html = f"""<!doctype html>
 <html lang="zh-CN">
@@ -439,7 +440,7 @@ def write_html(series_list: list[IndexSeries], output_path: Path) -> None:
 <main>
   <header>
     <h1>自由现金流指数对比</h1>
-    <p class="subtitle">中证全指自由现金流指数（932365.CSI）与国证自由现金流指数（980092.CNI） · {all_start} 至 {all_end} · 点位口径，各自基日为 1000</p>
+    <p class="subtitle">{subtitle_names} · {all_start} 至 {all_end} · 点位口径，各自基日为 1000</p>
   </header>
   <section class="stats" id="stats" aria-label="指数统计"></section>
   <section class="chart-shell">
@@ -618,7 +619,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="显示自由现金流指数折线图。")
     parser.add_argument("--env-file", default=".env", help="包含 TUSHARE_TOKEN 的环境文件。默认 .env。")
     parser.add_argument("--output-dir", default="output", help="输出目录。默认 output。")
-    parser.add_argument("--codes", default=",".join(DEFAULT_CODES), help="逗号分隔的指数代码。默认 932365.CSI,980092.CNI。")
+    parser.add_argument("--codes", default=",".join(DEFAULT_CODES), help="逗号分隔的指数代码。默认 932365.CSI,480092.CNI。")
     parser.add_argument("--start-date", default="20121231", help="开始日期，格式 YYYYMMDD。默认 20121231。")
     parser.add_argument("--end-date", default=TODAY, help="结束日期，格式 YYYYMMDD。")
     parser.add_argument("--no-open", action="store_true", help="生成后不自动打开 HTML。")
