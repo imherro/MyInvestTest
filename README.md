@@ -40,7 +40,7 @@
 
 每完成一次任务后，同步到 GitHub 仓库 `imherro/MyInvestTest`。同步时不要提交 `.env` 或任何本地密钥文件。
 
-## A 股自由现金流全收益指数图
+## 自由现金流指数图
 
 `.env` 中配置 `TUSHARE_TOKEN` 后，运行：
 
@@ -49,8 +49,15 @@ pip install -r requirements.txt
 python scripts/plot_free_cash_flow_index.py
 ```
 
-程序会先用 Tushare 指数元数据匹配 `富时中国A股自由现金流聚焦全收益指数`，尝试拉取 Tushare 指数行情；如果 Tushare 对该指数没有返回日线数据，会自动使用 TradingView 的 `FTSE:FCFQCD.TR` 总回报序列兜底。输出文件在 `output/`：
+程序默认对比两个 A 股自由现金流指数：
 
-- `a_share_free_cash_flow_total_return.html`：折线图
-- `a_share_free_cash_flow_total_return.csv`：原始行情数据
-- `free_cash_flow_index_candidates.csv`：Tushare 匹配到的候选指数
+- `932365.CSI`：中证全指自由现金流指数，使用 Tushare `index_daily`
+- `980092.CNI`：国证自由现金流指数，优先使用国证官网历史行情接口
+
+输出文件在 `output/`：
+
+- `free_cash_flow_indices.html`：折线对比图
+- `free_cash_flow_indices.csv`：合并行情数据
+- `932365_CSI_daily.csv`、`980092_CNI_daily.csv`：单指数原始行情数据
+
+为兼容旧浏览器路径，程序也会覆盖生成 `a_share_free_cash_flow_total_return.html` 和 `a_share_free_cash_flow_total_return.csv`。
