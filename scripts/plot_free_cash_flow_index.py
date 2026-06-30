@@ -18,7 +18,8 @@ TODAY = datetime.now().strftime("%Y%m%d")
 DEFAULT_CODE = "480092.CNI"
 DEFAULT_CNINDEX_CODE = "480092"
 DEFAULT_NAME = "国证自由现金流全收益指数"
-DEFAULT_TURNING_REVERSAL = 0.15
+DEFAULT_TURNING_REVERSAL = 0.10
+DEFAULT_Y_SCALE = "log"
 
 
 @dataclass
@@ -277,7 +278,7 @@ def safe_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False).replace("</", "<\\/")
 
 
-def chart_payload(series: IndexSeries, records: pd.DataFrame) -> dict[str, Any]:
+def chart_payload(series: IndexSeries, records: pd.DataFrame, y_scale: str) -> dict[str, Any]:
     data = series.data
     points = data[["trade_date", "close"]].to_dict(orient="records")
     turning_points = records[["sequence", "turning_type", "point_type", "trade_date", "close"]].to_dict(orient="records")
@@ -298,6 +299,7 @@ def chart_payload(series: IndexSeries, records: pd.DataFrame) -> dict[str, Any]:
         "source": series.source,
         "baseDate": series.base_date,
         "note": series.note,
+        "yScale": y_scale,
         "first": first,
         "last": last,
         "rows": len(points),
@@ -315,8 +317,8 @@ def chart_payload(series: IndexSeries, records: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def write_html(series: IndexSeries, records: pd.DataFrame, output_path: Path) -> None:
-    payload = chart_payload(series, records)
+def write_html(series: IndexSeries, records: pd.DataFrame, output_path: Path, y_scale: str) -> None:
+    payload = chart_payload(series, records, y_scale)
     html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -388,7 +390,7 @@ def write_html(series: IndexSeries, records: pd.DataFrame, output_path: Path) ->
       display: flex;
       flex-wrap: wrap;
       gap: 16px;
-      margin: 0 0 12px;
+      margin: 0;
       color: var(--muted);
       font-size: 13px;
     }}
@@ -402,6 +404,43 @@ def write_html(series: IndexSeries, records: pd.DataFrame, output_path: Path) ->
       height: 3px;
       border-radius: 999px;
       display: inline-block;
+    }}
+    .toolbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0 0 12px;
+    }}
+    .scale-control {{
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 3px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }}
+    .scale-control span {{
+      padding: 0 6px;
+    }}
+    .scale-control button {{
+      min-width: 54px;
+      height: 28px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      cursor: pointer;
+    }}
+    .scale-control button.active {{
+      background: #17202a;
+      color: #ffffff;
+      font-weight: 700;
     }}
     .chart-shell {{
       position: relative;
@@ -441,6 +480,10 @@ def write_html(series: IndexSeries, records: pd.DataFrame, output_path: Path) ->
       .stats {{
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }}
+      .toolbar {{
+        align-items: flex-start;
+        flex-direction: column;
+      }}
       canvas {{
         min-height: 360px;
       }}
@@ -457,11 +500,19 @@ def write_html(series: IndexSeries, records: pd.DataFrame, output_path: Path) ->
     <p class="subtitle">收盘价曲线 + 高低交替的波段拐点折线 · {payload["first"]["trade_date"]} 至 {payload["last"]["trade_date"]}</p>
   </header>
   <section class="stats" id="stats" aria-label="指数统计"></section>
-  <div class="legend">
-    <span><i class="swatch" style="background: var(--main)"></i>收盘价</span>
-    <span><i class="swatch" style="background: var(--turning-line)"></i>拐点折线</span>
-    <span><i class="swatch" style="background: var(--turning-high)"></i>波段高点</span>
-    <span><i class="swatch" style="background: var(--turning-low)"></i>波段低点</span>
+  <div class="toolbar">
+    <div class="legend">
+      <span><i class="swatch" style="background: var(--main)"></i>收盘价</span>
+      <span><i class="swatch" style="background: var(--turning-line)"></i>拐点折线</span>
+      <span><i class="swatch" style="background: var(--turning-high)"></i>波段高点</span>
+      <span><i class="swatch" style="background: var(--turning-low)"></i>波段低点</span>
+    </div>
+    <div class="scale-control" aria-label="Y轴模式">
+      <span>Y轴</span>
+      <button type="button" data-scale="linear">点位</button>
+      <button type="button" data-scale="percent">百分比</button>
+      <button type="button" data-scale="log">对数</button>
+    </div>
   </div>
   <section class="chart-shell">
     <canvas id="chart" aria-label="{series.name}波段拐点折线图"></canvas>
@@ -477,6 +528,8 @@ const tip = document.getElementById("tooltip");
 const ctx = canvas.getContext("2d");
 const fmt = new Intl.NumberFormat("zh-CN", {{ maximumFractionDigits: 2 }});
 const pct = new Intl.NumberFormat("zh-CN", {{ maximumFractionDigits: 2, minimumFractionDigits: 2 }});
+const scaleButtons = Array.from(document.querySelectorAll("[data-scale]"));
+let currentScale = payload.yScale || "log";
 
 payload.points = payload.points.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
 payload.turningPoints = payload.turningPoints.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
@@ -501,6 +554,24 @@ function extent(values) {{
   return [Math.min(...values), Math.max(...values)];
 }}
 
+function axisValue(close) {{
+  if (currentScale === "percent") return (close / payload.first.close - 1) * 100;
+  if (currentScale === "log") return Math.log(close);
+  return close;
+}}
+
+function axisLabel(value) {{
+  if (currentScale === "percent") return `${{pct.format(value)}}%`;
+  if (currentScale === "log") return fmt.format(Math.exp(value));
+  return fmt.format(value);
+}}
+
+function formatSegmentChange(fromPoint, toPoint) {{
+  const change = (toPoint.close / fromPoint.close - 1) * 100;
+  const sign = change > 0 ? "+" : "";
+  return `${{sign}}${{pct.format(change)}}%`;
+}}
+
 function resizeCanvas() {{
   const ratio = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -522,6 +593,69 @@ function drawLine(points, x, y, color, width) {{
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
   ctx.stroke();
+}}
+
+function drawSegmentLabels(points, x, y, plotTop, plotBottom) {{
+  if (points.length < 2) return;
+  ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const placedBoxes = [];
+  const overlaps = (box) => placedBoxes.some((item) => !(
+    box.right < item.left || box.left > item.right || box.bottom < item.top || box.top > item.bottom
+  ));
+  for (let index = 1; index < points.length; index++) {{
+    const fromPoint = points[index - 1];
+    const toPoint = points[index];
+    const change = (toPoint.close / fromPoint.close - 1) * 100;
+    const label = formatSegmentChange(fromPoint, toPoint);
+    const x1 = x(fromPoint.time);
+    const y1 = y(fromPoint.close);
+    const x2 = x(toPoint.time);
+    const y2 = y(toPoint.close);
+    const xx = (x1 + x2) / 2;
+    const midY = (y1 + y2) / 2;
+    const textWidth = ctx.measureText(label).width;
+    const padX = 6;
+    const boxW = textWidth + padX * 2;
+    const boxH = 20;
+    const direction = change >= 0 ? -1 : 1;
+    const offsets = [12, 34, -12, 56, -34, 78, -56].map((value) => value * direction);
+    let yy = midY + offsets[0];
+    let chosenBox = null;
+    for (const offset of offsets) {{
+      const candidateY = Math.max(plotTop + boxH / 2, Math.min(plotBottom - boxH / 2, midY + offset));
+      const box = {{
+        left: xx - boxW / 2 - 2,
+        right: xx + boxW / 2 + 2,
+        top: candidateY - boxH / 2 - 2,
+        bottom: candidateY + boxH / 2 + 2,
+      }};
+      if (!overlaps(box)) {{
+        yy = candidateY;
+        chosenBox = box;
+        break;
+      }}
+    }}
+    if (!chosenBox) {{
+      chosenBox = {{
+        left: xx - boxW / 2 - 2,
+        right: xx + boxW / 2 + 2,
+        top: yy - boxH / 2 - 2,
+        bottom: yy + boxH / 2 + 2,
+      }};
+    }}
+    placedBoxes.push(chosenBox);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.88)";
+    ctx.strokeStyle = change >= 0 ? "rgba(180, 95, 6, 0.35)" : "rgba(39, 95, 159, 0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(xx - boxW / 2, yy - boxH / 2, boxW, boxH, 5);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = change >= 0 ? "#8f4a05" : "#275f9f";
+    ctx.fillText(label, xx, yy + 0.5);
+  }}
 }}
 
 function drawTurningMarkers(points, x, y) {{
@@ -558,12 +692,12 @@ function draw(activeTime = null) {{
   const plotW = width - margin.left - margin.right;
   const plotH = height - margin.top - margin.bottom;
   const [minTime, maxTime] = extent(payload.points.map((p) => p.time));
-  const [minValue, maxValue] = extent(payload.points.map((p) => p.close));
+  const [minValue, maxValue] = extent(payload.points.map((p) => axisValue(p.close)));
   const pad = (maxValue - minValue) * 0.08 || 1;
   const lo = minValue - pad;
   const hi = maxValue + pad;
   const x = (time) => margin.left + ((time - minTime) / Math.max(1, maxTime - minTime)) * plotW;
-  const y = (value) => margin.top + ((hi - value) / (hi - lo)) * plotH;
+  const y = (close) => margin.top + ((hi - axisValue(close)) / (hi - lo)) * plotH;
 
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = "#ffffff";
@@ -577,12 +711,12 @@ function draw(activeTime = null) {{
   ctx.textBaseline = "middle";
   for (let i = 0; i <= 5; i++) {{
     const value = lo + ((hi - lo) * i) / 5;
-    const yy = y(value);
+    const yy = margin.top + ((hi - value) / (hi - lo)) * plotH;
     ctx.beginPath();
     ctx.moveTo(margin.left, yy);
     ctx.lineTo(width - margin.right, yy);
     ctx.stroke();
-    ctx.fillText(fmt.format(value), margin.left - 10, yy);
+    ctx.fillText(axisLabel(value), margin.left - 10, yy);
   }}
 
   ctx.textAlign = "center";
@@ -596,6 +730,7 @@ function draw(activeTime = null) {{
 
   drawLine(payload.points, x, y, "#1f7a68", 2.2);
   drawLine(payload.turningPoints, x, y, "#3d4752", 1.6);
+  drawSegmentLabels(payload.turningPoints, x, y, margin.top, height - margin.bottom);
   drawTurningMarkers(payload.turningPoints, x, y);
 
   if (activeTime !== null) {{
@@ -668,7 +803,23 @@ canvas.addEventListener("mouseleave", () => {{
   draw();
 }});
 
+function updateScaleButtons() {{
+  for (const button of scaleButtons) {{
+    button.classList.toggle("active", button.dataset.scale === currentScale);
+  }}
+}}
+
+for (const button of scaleButtons) {{
+  button.addEventListener("click", () => {{
+    currentScale = button.dataset.scale;
+    tip.style.display = "none";
+    updateScaleButtons();
+    draw();
+  }});
+}}
+
 window.addEventListener("resize", resizeCanvas);
+updateScaleButtons();
 resizeCanvas();
 </script>
 </body>
@@ -688,7 +839,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--turning-reversal",
         type=float,
         default=DEFAULT_TURNING_REVERSAL,
-        help="确认拐点所需的反向涨跌幅，0.15 表示 15%。默认 0.15。",
+        help="确认拐点所需的反向涨跌幅，0.10 表示 10%。默认 0.10。",
+    )
+    parser.add_argument(
+        "--y-scale",
+        choices=("linear", "percent", "log"),
+        default=DEFAULT_Y_SCALE,
+        help="Y 轴显示模式：linear 为点位，percent 为相对起点累计涨幅，log 为对数轴。默认 log。",
     )
     parser.add_argument("--no-open", action="store_true", help="生成后不自动打开 HTML。")
     return parser
@@ -713,8 +870,8 @@ def main() -> int:
     write_daily_csv(series, daily_csv_path)
     write_daily_csv(series, legacy_csv_path)
     write_record_csv(records, records_csv_path)
-    write_html(series, records, html_path)
-    write_html(series, records, legacy_html_path)
+    write_html(series, records, html_path, args.y_scale)
+    write_html(series, records, legacy_html_path, args.y_scale)
 
     first = series.data.iloc[0]
     last = series.data.iloc[-1]
@@ -724,6 +881,7 @@ def main() -> int:
     print(f"- 数据范围：{first['trade_date']} 至 {last['trade_date']}，共 {len(series.data)} 条")
     print(f"- 最新收盘：{last['close']:.4f}")
     print(f"- 反向确认阈值：{args.turning_reversal * 100:.0f}%")
+    print(f"- Y轴模式：{args.y_scale}")
     print(f"- 拐点总数：{len(records)} 个；高点：{high_count} 个；低点：{low_count} 个")
     print(f"HTML：{html_path.resolve()}")
     print(f"当前浏览器旧路径也已覆盖：{legacy_html_path.resolve()}")
