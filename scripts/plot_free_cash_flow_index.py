@@ -18,6 +18,7 @@ TODAY = datetime.now().strftime("%Y%m%d")
 DEFAULT_CODE = "480092.CNI"
 DEFAULT_CNINDEX_CODE = "480092"
 DEFAULT_NAME = "国证自由现金流全收益指数"
+DEFAULT_TURNING_REVERSAL = 0.15
 
 
 @dataclass
@@ -122,7 +123,7 @@ def filter_by_date(data: pd.DataFrame, start_date: str, end_date: str) -> pd.Dat
     return data[(data["trade_date"] >= start) & (data["trade_date"] <= end)].copy().reset_index(drop=True)
 
 
-def add_turning_point_flags(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def add_turning_point_flags(data: pd.DataFrame, reversal_threshold: float) -> tuple[pd.DataFrame, pd.DataFrame]:
     data = data.copy().reset_index(drop=True)
     data["turning_high"] = False
     data["turning_low"] = False
@@ -132,12 +133,15 @@ def add_turning_point_flags(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
         return data, pd.DataFrame(columns=record_columns)
 
     closes = [float(value) for value in data["close"].to_list()]
-    candidates: list[dict[str, Any]] = []
+    if reversal_threshold <= 0:
+        raise ValueError("拐点反转阈值必须大于 0。")
 
-    def add_candidate(row_index: int, turning_type: str, point_type: str) -> None:
-        if candidates and candidates[-1]["row_index"] == row_index:
+    pivots: list[dict[str, Any]] = []
+
+    def add_pivot(row_index: int, turning_type: str, point_type: str) -> None:
+        if pivots and pivots[-1]["row_index"] == row_index:
             return
-        candidates.append(
+        pivots.append(
             {
                 "row_index": row_index,
                 "turning_type": turning_type,
@@ -147,83 +151,63 @@ def add_turning_point_flags(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
             }
         )
 
-    first_direction = 0
-    first_direction_index = 0
+    trend = 0
+    high_idx = 0
+    low_idx = 0
+
     for idx in range(1, len(closes)):
-        if closes[idx] > closes[idx - 1]:
-            first_direction = 1
-            first_direction_index = idx
-            break
-        if closes[idx] < closes[idx - 1]:
-            first_direction = -1
-            first_direction_index = idx
-            break
+        close = closes[idx]
 
-    if first_direction == 0:
-        add_candidate(0, "flat", "起点/横盘")
-    else:
-        if first_direction > 0:
-            add_candidate(0, "low", "起点低点")
-        else:
-            add_candidate(0, "high", "起点高点")
+        if trend == 0:
+            if close >= closes[high_idx]:
+                high_idx = idx
+            if close <= closes[low_idx]:
+                low_idx = idx
 
-        trend = first_direction
-        candidate_idx = first_direction_index
+            has_enough_range = closes[high_idx] / closes[low_idx] - 1 >= reversal_threshold
+            if not has_enough_range:
+                continue
 
-        for idx in range(first_direction_index + 1, len(closes)):
-            close = closes[idx]
-            previous_close = closes[idx - 1]
-
-            if trend > 0:
-                if close >= closes[candidate_idx]:
-                    candidate_idx = idx
-                elif close < previous_close:
-                    add_candidate(candidate_idx, "high", "候选高点")
-                    trend = -1
-                    candidate_idx = idx
+            if low_idx < high_idx:
+                add_pivot(low_idx, "low", "起点低点")
+                trend = 1
             else:
-                if close <= closes[candidate_idx]:
-                    candidate_idx = idx
-                elif close > previous_close:
-                    add_candidate(candidate_idx, "low", "候选低点")
-                    trend = 1
-                    candidate_idx = idx
-
-        add_candidate(candidate_idx, "high" if trend > 0 else "low", "末段高点" if trend > 0 else "末段低点")
-
-    def is_more_extreme(pivot: dict[str, Any], reference: dict[str, Any]) -> bool:
-        if pivot["turning_type"] == "high":
-            return float(pivot["close"]) > float(reference["close"])
-        if pivot["turning_type"] == "low":
-            return float(pivot["close"]) < float(reference["close"])
-        return False
-
-    pivots: list[dict[str, Any]] = []
-    last_by_type: dict[str, dict[str, Any]] = {}
-    for candidate in candidates:
-        turning_type = candidate["turning_type"]
-        if turning_type not in {"high", "low"}:
-            pivots.append(candidate)
+                add_pivot(high_idx, "high", "起点高点")
+                trend = -1
             continue
 
-        if pivots and pivots[-1]["turning_type"] == turning_type:
-            if is_more_extreme(candidate, pivots[-1]):
-                pivots[-1] = candidate
-                last_by_type[turning_type] = candidate
+        if trend > 0:
+            if close >= closes[high_idx]:
+                high_idx = idx
+                continue
+            drawdown = (closes[high_idx] - close) / closes[high_idx]
+            if drawdown >= reversal_threshold:
+                add_pivot(high_idx, "high", "有效高拐点")
+                trend = -1
+                low_idx = idx
             continue
 
-        previous_same_type = last_by_type.get(turning_type)
-        if previous_same_type is None or is_more_extreme(candidate, previous_same_type):
-            pivots.append(candidate)
-            last_by_type[turning_type] = candidate
+        if close <= closes[low_idx]:
+            low_idx = idx
+            continue
+        rebound = (close - closes[low_idx]) / closes[low_idx]
+        if rebound >= reversal_threshold:
+            add_pivot(low_idx, "low", "有效低拐点")
+            trend = 1
+            high_idx = idx
+
+    if trend == 0:
+        add_pivot(0, "flat", "起点/横盘")
+    else:
+        last_idx = high_idx if trend > 0 else low_idx
+        last_type = "high" if trend > 0 else "low"
+        add_pivot(last_idx, last_type, "末段高拐点" if trend > 0 else "末段低拐点")
 
     def normalize_point_type(pivot: dict[str, Any]) -> str:
         point_type = str(pivot["point_type"])
         turning_type = pivot["turning_type"]
-        if point_type.startswith("起点") or turning_type == "flat":
+        if point_type.startswith("起点") or point_type.startswith("末段") or turning_type == "flat":
             return point_type
-        if point_type.startswith("末段"):
-            return "末段高拐点" if turning_type == "high" else "末段低拐点"
         return "有效高拐点" if turning_type == "high" else "有效低拐点"
 
     records: list[dict[str, Any]] = []
@@ -246,19 +230,19 @@ def add_turning_point_flags(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
     return data, pd.DataFrame(records, columns=record_columns)
 
 
-def fetch_index_series(code: str, start_date: str, end_date: str) -> IndexSeries:
+def fetch_index_series(code: str, start_date: str, end_date: str, reversal_threshold: float) -> IndexSeries:
     cnindex_code = code.split(".")[0] if code.endswith(".CNI") else DEFAULT_CNINDEX_CODE
     data = fetch_cnindex_daily(cnindex_code, start_date, end_date)
     data = filter_by_date(data, start_date, end_date)
     if data.empty:
         raise RuntimeError(f"{code} 按日期过滤后没有数据。")
-    data, _ = add_turning_point_flags(data)
+    threshold_pct = reversal_threshold * 100
     return IndexSeries(
         code=code,
         name=DEFAULT_NAME if code == DEFAULT_CODE else code,
         source="国证官网 getIndexDailyDataWithDataFormat",
         data=data,
-        note="拐点先由收盘价方向反转产生候选点，再按同类突破确认：高点必须高于前一个有效高点，低点必须低于前一个有效低点；未突破时只更新当前趋势的末端极值，不新增拐点。",
+        note=f"拐点按收盘价 ZigZag 规则确认：上升段持续更新最高点，回撤达到 {threshold_pct:.0f}% 后确认高拐点；下降段持续更新最低点，反弹达到 {threshold_pct:.0f}% 后确认低拐点；末段显示当前段极值。",
     )
 
 
@@ -700,6 +684,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--code", default=DEFAULT_CODE, help="指数代码。默认 480092.CNI。")
     parser.add_argument("--start-date", default="20121231", help="开始日期，格式 YYYYMMDD。默认 20121231。")
     parser.add_argument("--end-date", default=TODAY, help="结束日期，格式 YYYYMMDD。")
+    parser.add_argument(
+        "--turning-reversal",
+        type=float,
+        default=DEFAULT_TURNING_REVERSAL,
+        help="确认拐点所需的反向涨跌幅，0.15 表示 15%。默认 0.15。",
+    )
     parser.add_argument("--no-open", action="store_true", help="生成后不自动打开 HTML。")
     return parser
 
@@ -711,8 +701,8 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    series = fetch_index_series(args.code, args.start_date, args.end_date)
-    series.data, records = add_turning_point_flags(series.data)
+    series = fetch_index_series(args.code, args.start_date, args.end_date, args.turning_reversal)
+    series.data, records = add_turning_point_flags(series.data, args.turning_reversal)
 
     daily_csv_path = output_dir / f"{series.code.replace('.', '_')}_daily.csv"
     records_csv_path = output_dir / f"{series.code.replace('.', '_')}_record_points.csv"
@@ -733,6 +723,7 @@ def main() -> int:
     print(f"已生成 {series.code} 波段拐点折线图：")
     print(f"- 数据范围：{first['trade_date']} 至 {last['trade_date']}，共 {len(series.data)} 条")
     print(f"- 最新收盘：{last['close']:.4f}")
+    print(f"- 反向确认阈值：{args.turning_reversal * 100:.0f}%")
     print(f"- 拐点总数：{len(records)} 个；高点：{high_count} 个；低点：{low_count} 个")
     print(f"HTML：{html_path.resolve()}")
     print(f"当前浏览器旧路径也已覆盖：{legacy_html_path.resolve()}")
