@@ -205,32 +205,62 @@ def add_turning_point_flags(data: pd.DataFrame, reversal_threshold: float) -> tu
         last_type = "high" if trend > 0 else "low"
         add_pivot(last_idx, last_type, "末段高拐点" if trend > 0 else "末段低拐点")
 
-    def keep_only_higher_highs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        filtered: list[dict[str, Any]] = []
-        last_high_close: float | None = None
-        skip_next_low = False
+    def make_pivot(row_index: int, turning_type: str, point_type: str) -> dict[str, Any]:
+        return {
+            "row_index": row_index,
+            "turning_type": turning_type,
+            "point_type": point_type,
+            "trade_date": data.at[row_index, "trade_date"],
+            "close": closes[row_index],
+        }
+
+    def lowest_pivot_between(start_idx: int, end_idx: int, point_type: str) -> dict[str, Any] | None:
+        if end_idx - start_idx <= 1:
+            return None
+        low_idx = min(range(start_idx + 1, end_idx), key=lambda row_index: closes[row_index])
+        return make_pivot(low_idx, "low", point_type)
+
+    def rebuild_lows_between_higher_highs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        higher_highs: list[dict[str, Any]] = []
+        first_low: dict[str, Any] | None = None
 
         for pivot in items:
             turning_type = pivot["turning_type"]
             if turning_type == "high":
-                close = float(pivot["close"])
-                if last_high_close is None or close > last_high_close:
-                    filtered.append(pivot)
-                    last_high_close = close
-                    skip_next_low = False
-                else:
-                    skip_next_low = True
-                continue
+                if not higher_highs or float(pivot["close"]) > float(higher_highs[-1]["close"]):
+                    higher_highs.append(pivot)
+            elif turning_type == "low" and not higher_highs:
+                if first_low is None or float(pivot["close"]) < float(first_low["close"]):
+                    first_low = pivot
 
-            if turning_type == "low" and skip_next_low:
-                skip_next_low = False
-                continue
+        if not higher_highs:
+            return [first_low] if first_low is not None else items
 
-            filtered.append(pivot)
+        rebuilt: list[dict[str, Any]] = []
+        if first_low is not None and int(first_low["row_index"]) < int(higher_highs[0]["row_index"]):
+            rebuilt.append(first_low)
 
-        return filtered
+        rebuilt.append(higher_highs[0])
+        previous_high = higher_highs[0]
 
-    pivots = keep_only_higher_highs(pivots)
+        for current_high in higher_highs[1:]:
+            interval_low = lowest_pivot_between(
+                int(previous_high["row_index"]),
+                int(current_high["row_index"]),
+                "有效低拐点",
+            )
+            if interval_low is not None:
+                rebuilt.append(interval_low)
+            rebuilt.append(current_high)
+            previous_high = current_high
+
+        tail_low = lowest_pivot_between(int(previous_high["row_index"]), len(closes), "末段低拐点")
+        if tail_low is not None and float(tail_low["close"]) < float(previous_high["close"]):
+            rebuilt.append(tail_low)
+
+        return rebuilt
+
+    pivots = rebuild_lows_between_higher_highs(pivots)
 
     def normalize_point_type(pivot: dict[str, Any]) -> str:
         point_type = str(pivot["point_type"])
@@ -271,7 +301,7 @@ def fetch_index_series(code: str, start_date: str, end_date: str, reversal_thres
         name=DEFAULT_NAME if code == DEFAULT_CODE else code,
         source="国证官网 getIndexDailyDataWithDataFormat",
         data=data,
-        note=f"拐点按收盘价 ZigZag 规则确认：上升段持续更新最高点，回撤达到 {threshold_pct_text} 后形成候选高拐点，且必须高于前一个有效高拐点才保留；下降段持续更新最低点，反弹达到 {threshold_pct_text} 后确认低拐点；末段显示当前段极值。",
+        note=f"拐点按收盘价 ZigZag 规则确认：上升段持续更新最高点，回撤达到 {threshold_pct_text} 后形成候选高拐点，且必须高于前一个有效高拐点才保留；低拐点按相邻有效高拐点之间的最低收盘点更新，末段低点取最后一个有效高拐点之后的最低收盘点。",
     )
 
 
