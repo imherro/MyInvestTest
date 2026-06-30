@@ -18,7 +18,8 @@ TODAY = datetime.now().strftime("%Y%m%d")
 DEFAULT_CODE = "480092.CNI"
 DEFAULT_CNINDEX_CODE = "480092"
 DEFAULT_NAME = "国证自由现金流全收益指数"
-DEFAULT_TURNING_REVERSAL = 0.10
+DEFAULT_START_DATE = "20160101"
+DEFAULT_TURNING_REVERSAL = 0.125
 DEFAULT_Y_SCALE = "log"
 
 
@@ -237,13 +238,13 @@ def fetch_index_series(code: str, start_date: str, end_date: str, reversal_thres
     data = filter_by_date(data, start_date, end_date)
     if data.empty:
         raise RuntimeError(f"{code} 按日期过滤后没有数据。")
-    threshold_pct = reversal_threshold * 100
+    threshold_pct_text = f"{reversal_threshold * 100:g}%"
     return IndexSeries(
         code=code,
         name=DEFAULT_NAME if code == DEFAULT_CODE else code,
         source="国证官网 getIndexDailyDataWithDataFormat",
         data=data,
-        note=f"拐点按收盘价 ZigZag 规则确认：上升段持续更新最高点，回撤达到 {threshold_pct:.0f}% 后确认高拐点；下降段持续更新最低点，反弹达到 {threshold_pct:.0f}% 后确认低拐点；末段显示当前段极值。",
+        note=f"拐点按收盘价 ZigZag 规则确认：上升段持续更新最高点，回撤达到 {threshold_pct_text} 后确认高拐点；下降段持续更新最低点，反弹达到 {threshold_pct_text} 后确认低拐点；末段显示当前段极值。",
     )
 
 
@@ -840,13 +841,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--env-file", default=".env", help="可选环境文件。默认 .env。")
     parser.add_argument("--output-dir", default="output", help="输出目录。默认 output。")
     parser.add_argument("--code", default=DEFAULT_CODE, help="指数代码。默认 480092.CNI。")
-    parser.add_argument("--start-date", default="20121231", help="开始日期，格式 YYYYMMDD。默认 20121231。")
+    parser.add_argument("--start-date", default=DEFAULT_START_DATE, help="开始日期，格式 YYYYMMDD。默认 20160101。")
     parser.add_argument("--end-date", default=TODAY, help="结束日期，格式 YYYYMMDD。")
     parser.add_argument(
         "--turning-reversal",
         type=float,
         default=DEFAULT_TURNING_REVERSAL,
-        help="确认拐点所需的反向涨跌幅，0.10 表示 10%。默认 0.10。",
+        help="确认拐点所需的反向涨跌幅，0.125 表示 12.5%。默认 0.125。",
     )
     parser.add_argument(
         "--y-scale",
@@ -887,7 +888,7 @@ def main() -> int:
     print(f"已生成 {series.code} 波段拐点折线图：")
     print(f"- 数据范围：{first['trade_date']} 至 {last['trade_date']}，共 {len(series.data)} 条")
     print(f"- 最新收盘：{last['close']:.4f}")
-    print(f"- 反向确认阈值：{args.turning_reversal * 100:.0f}%")
+    print(f"- 反向确认阈值：{args.turning_reversal * 100:g}%")
     print(f"- Y轴模式：{args.y_scale}")
     print(f"- 拐点总数：{len(records)} 个；高点：{high_count} 个；低点：{low_count} 个")
     print(f"HTML：{html_path.resolve()}")
