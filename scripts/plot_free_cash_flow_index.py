@@ -122,49 +122,128 @@ def filter_by_date(data: pd.DataFrame, start_date: str, end_date: str) -> pd.Dat
     return data[(data["trade_date"] >= start) & (data["trade_date"] <= end)].copy().reset_index(drop=True)
 
 
-def add_record_flags(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    data = data.copy()
-    high_records: list[dict[str, Any]] = []
-    low_records: list[dict[str, Any]] = []
-    record_high = float("-inf")
-    record_low = float("inf")
-    high_seq = 0
-    low_seq = 0
+def add_turning_point_flags(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    data = data.copy().reset_index(drop=True)
+    data["turning_high"] = False
+    data["turning_low"] = False
 
-    data["record_high"] = False
-    data["record_low"] = False
+    record_columns = ["sequence", "turning_type", "point_type", "trade_date", "close"]
+    if data.empty:
+        return data, pd.DataFrame(columns=record_columns)
 
-    for idx, row in data.iterrows():
-        close = float(row["close"])
-        is_first = idx == 0
-        if is_first or close > record_high:
-            high_seq += 1
-            record_high = close
-            data.at[idx, "record_high"] = True
-            high_records.append(
-                {
-                    "record_type": "新高" if not is_first else "起点/新高基准",
-                    "sequence": high_seq,
-                    "trade_date": row["trade_date"],
-                    "close": close,
-                }
-            )
-        if is_first or close < record_low:
-            low_seq += 1
-            record_low = close
-            data.at[idx, "record_low"] = True
-            low_records.append(
-                {
-                    "record_type": "新低" if not is_first else "起点/新低基准",
-                    "sequence": low_seq,
-                    "trade_date": row["trade_date"],
-                    "close": close,
-                }
-            )
+    closes = [float(value) for value in data["close"].to_list()]
+    candidates: list[dict[str, Any]] = []
 
-    records = pd.DataFrame(high_records + low_records)
-    records = records.sort_values(["trade_date", "record_type", "sequence"]).reset_index(drop=True)
-    return data, records
+    def add_candidate(row_index: int, turning_type: str, point_type: str) -> None:
+        if candidates and candidates[-1]["row_index"] == row_index:
+            return
+        candidates.append(
+            {
+                "row_index": row_index,
+                "turning_type": turning_type,
+                "point_type": point_type,
+                "trade_date": data.at[row_index, "trade_date"],
+                "close": closes[row_index],
+            }
+        )
+
+    first_direction = 0
+    first_direction_index = 0
+    for idx in range(1, len(closes)):
+        if closes[idx] > closes[idx - 1]:
+            first_direction = 1
+            first_direction_index = idx
+            break
+        if closes[idx] < closes[idx - 1]:
+            first_direction = -1
+            first_direction_index = idx
+            break
+
+    if first_direction == 0:
+        add_candidate(0, "flat", "起点/横盘")
+    else:
+        if first_direction > 0:
+            add_candidate(0, "low", "起点低点")
+        else:
+            add_candidate(0, "high", "起点高点")
+
+        trend = first_direction
+        candidate_idx = first_direction_index
+
+        for idx in range(first_direction_index + 1, len(closes)):
+            close = closes[idx]
+            previous_close = closes[idx - 1]
+
+            if trend > 0:
+                if close >= closes[candidate_idx]:
+                    candidate_idx = idx
+                elif close < previous_close:
+                    add_candidate(candidate_idx, "high", "候选高点")
+                    trend = -1
+                    candidate_idx = idx
+            else:
+                if close <= closes[candidate_idx]:
+                    candidate_idx = idx
+                elif close > previous_close:
+                    add_candidate(candidate_idx, "low", "候选低点")
+                    trend = 1
+                    candidate_idx = idx
+
+        add_candidate(candidate_idx, "high" if trend > 0 else "low", "末段高点" if trend > 0 else "末段低点")
+
+    def is_more_extreme(pivot: dict[str, Any], reference: dict[str, Any]) -> bool:
+        if pivot["turning_type"] == "high":
+            return float(pivot["close"]) > float(reference["close"])
+        if pivot["turning_type"] == "low":
+            return float(pivot["close"]) < float(reference["close"])
+        return False
+
+    pivots: list[dict[str, Any]] = []
+    last_by_type: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        turning_type = candidate["turning_type"]
+        if turning_type not in {"high", "low"}:
+            pivots.append(candidate)
+            continue
+
+        if pivots and pivots[-1]["turning_type"] == turning_type:
+            if is_more_extreme(candidate, pivots[-1]):
+                pivots[-1] = candidate
+                last_by_type[turning_type] = candidate
+            continue
+
+        previous_same_type = last_by_type.get(turning_type)
+        if previous_same_type is None or is_more_extreme(candidate, previous_same_type):
+            pivots.append(candidate)
+            last_by_type[turning_type] = candidate
+
+    def normalize_point_type(pivot: dict[str, Any]) -> str:
+        point_type = str(pivot["point_type"])
+        turning_type = pivot["turning_type"]
+        if point_type.startswith("起点") or turning_type == "flat":
+            return point_type
+        if point_type.startswith("末段"):
+            return "末段高拐点" if turning_type == "high" else "末段低拐点"
+        return "有效高拐点" if turning_type == "high" else "有效低拐点"
+
+    records: list[dict[str, Any]] = []
+    for sequence, pivot in enumerate(pivots, start=1):
+        row_index = pivot["row_index"]
+        if pivot["turning_type"] == "high":
+            data.at[row_index, "turning_high"] = True
+        elif pivot["turning_type"] == "low":
+            data.at[row_index, "turning_low"] = True
+        records.append(
+            {
+                "sequence": sequence,
+                "turning_type": pivot["turning_type"],
+                "point_type": normalize_point_type(pivot),
+                "trade_date": pivot["trade_date"],
+                "close": pivot["close"],
+            }
+        )
+
+    return data, pd.DataFrame(records, columns=record_columns)
 
 
 def fetch_index_series(code: str, start_date: str, end_date: str) -> IndexSeries:
@@ -173,13 +252,13 @@ def fetch_index_series(code: str, start_date: str, end_date: str) -> IndexSeries
     data = filter_by_date(data, start_date, end_date)
     if data.empty:
         raise RuntimeError(f"{code} 按日期过滤后没有数据。")
-    data, _ = add_record_flags(data)
+    data, _ = add_turning_point_flags(data)
     return IndexSeries(
         code=code,
         name=DEFAULT_NAME if code == DEFAULT_CODE else code,
         source="国证官网 getIndexDailyDataWithDataFormat",
         data=data,
-        note="历史新高/新低按收盘点位逐日严格刷新计算，首日作为新高和新低的共同基准点。",
+        note="拐点先由收盘价方向反转产生候选点，再按同类突破确认：高点必须高于前一个有效高点，低点必须低于前一个有效低点；未突破时只更新当前趋势的末端极值，不新增拐点。",
     )
 
 
@@ -196,8 +275,8 @@ def write_daily_csv(series: IndexSeries, output_path: Path) -> None:
             "pct_chg",
             "vol",
             "amount",
-            "record_high",
-            "record_low",
+            "turning_high",
+            "turning_low",
         )
         if col in series.data.columns
     ]
@@ -217,8 +296,13 @@ def safe_json(value: Any) -> str:
 def chart_payload(series: IndexSeries, records: pd.DataFrame) -> dict[str, Any]:
     data = series.data
     points = data[["trade_date", "close"]].to_dict(orient="records")
-    record_highs = data[data["record_high"]][["trade_date", "close"]].to_dict(orient="records")
-    record_lows = data[data["record_low"]][["trade_date", "close"]].to_dict(orient="records")
+    turning_points = records[["sequence", "turning_type", "point_type", "trade_date", "close"]].to_dict(orient="records")
+    turning_highs = records[records["turning_type"] == "high"][["sequence", "point_type", "trade_date", "close"]].to_dict(
+        orient="records"
+    )
+    turning_lows = records[records["turning_type"] == "low"][["sequence", "point_type", "trade_date", "close"]].to_dict(
+        orient="records"
+    )
     first = points[0]
     last = points[-1]
     all_time_high = max(points, key=lambda item: item["close"])
@@ -236,12 +320,14 @@ def chart_payload(series: IndexSeries, records: pd.DataFrame) -> dict[str, Any]:
         "totalReturn": total_return,
         "allTimeHigh": all_time_high,
         "allTimeLow": all_time_low,
-        "recordHighCount": len(record_highs),
-        "recordLowCount": len(record_lows),
-        "recordRows": records.to_dict(orient="records"),
+        "turningPointCount": len(turning_points),
+        "turningHighCount": len(turning_highs),
+        "turningLowCount": len(turning_lows),
+        "turningRows": records.to_dict(orient="records"),
         "points": points,
-        "recordHighs": record_highs,
-        "recordLows": record_lows,
+        "turningPoints": turning_points,
+        "turningHighs": turning_highs,
+        "turningLows": turning_lows,
     }
 
 
@@ -252,7 +338,7 @@ def write_html(series: IndexSeries, records: pd.DataFrame, output_path: Path) ->
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{series.name}新高新低标记</title>
+  <title>{series.name}波段拐点标记</title>
   <style>
     :root {{
       color-scheme: light;
@@ -262,8 +348,9 @@ def write_html(series: IndexSeries, records: pd.DataFrame, output_path: Path) ->
       --panel: #ffffff;
       --bg: #f5f7f9;
       --main: #1f7a68;
-      --record-high: #b45f06;
-      --record-low: #275f9f;
+      --turning-line: #3d4752;
+      --turning-high: #b45f06;
+      --turning-low: #275f9f;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -383,16 +470,17 @@ def write_html(series: IndexSeries, records: pd.DataFrame, output_path: Path) ->
 <main>
   <header>
     <h1>{series.name}（{series.code}）</h1>
-    <p class="subtitle">收盘价曲线 + 历史新高折线 + 历史新低折线 · {payload["first"]["trade_date"]} 至 {payload["last"]["trade_date"]}</p>
+    <p class="subtitle">收盘价曲线 + 高低交替的波段拐点折线 · {payload["first"]["trade_date"]} 至 {payload["last"]["trade_date"]}</p>
   </header>
   <section class="stats" id="stats" aria-label="指数统计"></section>
   <div class="legend">
     <span><i class="swatch" style="background: var(--main)"></i>收盘价</span>
-    <span><i class="swatch" style="background: var(--record-high)"></i>历史新高记录点连线</span>
-    <span><i class="swatch" style="background: var(--record-low)"></i>历史新低记录点连线</span>
+    <span><i class="swatch" style="background: var(--turning-line)"></i>拐点折线</span>
+    <span><i class="swatch" style="background: var(--turning-high)"></i>波段高点</span>
+    <span><i class="swatch" style="background: var(--turning-low)"></i>波段低点</span>
   </div>
   <section class="chart-shell">
-    <canvas id="chart" aria-label="{series.name}新高新低折线图"></canvas>
+    <canvas id="chart" aria-label="{series.name}波段拐点折线图"></canvas>
     <div class="tooltip" id="tooltip"></div>
   </section>
   <section class="notes" id="notes" aria-label="数据说明"></section>
@@ -407,14 +495,15 @@ const fmt = new Intl.NumberFormat("zh-CN", {{ maximumFractionDigits: 2 }});
 const pct = new Intl.NumberFormat("zh-CN", {{ maximumFractionDigits: 2, minimumFractionDigits: 2 }});
 
 payload.points = payload.points.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
-payload.recordHighs = payload.recordHighs.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
-payload.recordLows = payload.recordLows.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
+payload.turningPoints = payload.turningPoints.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
+payload.turningHighs = payload.turningHighs.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
+payload.turningLows = payload.turningLows.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
 
 document.getElementById("stats").innerHTML = `
   <div class="stat"><span class="label">最新点位</span><span class="value">${{fmt.format(payload.last.close)}}</span></div>
   <div class="stat"><span class="label">区间涨幅</span><span class="value">${{pct.format(payload.totalReturn)}}%</span></div>
-  <div class="stat"><span class="label">新高记录点</span><span class="value">${{payload.recordHighCount}}</span></div>
-  <div class="stat"><span class="label">新低记录点</span><span class="value">${{payload.recordLowCount}}</span></div>
+  <div class="stat"><span class="label">拐点总数</span><span class="value">${{payload.turningPointCount}}</span></div>
+  <div class="stat"><span class="label">高点 / 低点</span><span class="value">${{payload.turningHighCount}} / ${{payload.turningLowCount}}</span></div>
   <div class="stat"><span class="label">最高收盘</span><span class="value">${{fmt.format(payload.allTimeHigh.close)}}</span></div>
   <div class="stat"><span class="label">最低收盘</span><span class="value">${{fmt.format(payload.allTimeLow.close)}}</span></div>
 `;
@@ -437,7 +526,7 @@ function resizeCanvas() {{
   draw();
 }}
 
-function drawLine(points, x, y, color, width, markerKind = null) {{
+function drawLine(points, x, y, color, width) {{
   if (!points.length) return;
   ctx.beginPath();
   points.forEach((point, index) => {{
@@ -449,22 +538,29 @@ function drawLine(points, x, y, color, width, markerKind = null) {{
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
   ctx.stroke();
-  if (!markerKind) return;
-  ctx.fillStyle = color;
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineWidth = 1.2;
+}}
+
+function drawTurningMarkers(points, x, y) {{
   for (const point of points) {{
     const xx = x(point.time);
     const yy = y(point.close);
+    const isHigh = point.turning_type === "high";
+    const isLow = point.turning_type === "low";
+    const color = isHigh ? "#b45f06" : isLow ? "#275f9f" : "#3d4752";
+    ctx.fillStyle = color;
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1.3;
     ctx.beginPath();
-    if (markerKind === "diamond") {{
-      ctx.moveTo(xx, yy - 4);
-      ctx.lineTo(xx + 4, yy);
-      ctx.lineTo(xx, yy + 4);
-      ctx.lineTo(xx - 4, yy);
+    if (isLow) {{
+      ctx.moveTo(xx, yy - 4.6);
+      ctx.lineTo(xx + 4.6, yy);
+      ctx.lineTo(xx, yy + 4.6);
+      ctx.lineTo(xx - 4.6, yy);
       ctx.closePath();
+    }} else if (isHigh) {{
+      ctx.arc(xx, yy, 4, 0, Math.PI * 2);
     }} else {{
-      ctx.arc(xx, yy, 3.4, 0, Math.PI * 2);
+      ctx.rect(xx - 3.5, yy - 3.5, 7, 7);
     }}
     ctx.fill();
     ctx.stroke();
@@ -515,8 +611,8 @@ function draw(activeTime = null) {{
   }}
 
   drawLine(payload.points, x, y, "#1f7a68", 2.2);
-  drawLine(payload.recordHighs, x, y, "#b45f06", 1.8, "circle");
-  drawLine(payload.recordLows, x, y, "#275f9f", 1.8, "diamond");
+  drawLine(payload.turningPoints, x, y, "#3d4752", 1.6);
+  drawTurningMarkers(payload.turningPoints, x, y);
 
   if (activeTime !== null) {{
     const nearest = nearestPoint(payload.points, activeTime);
@@ -548,8 +644,8 @@ function nearestPoint(points, time) {{
   return best;
 }}
 
-function lastRecordAtOrBefore(points, time) {{
-  let result = points[0];
+function lastPointAtOrBefore(points, time) {{
+  let result = null;
   for (const point of points) {{
     if (point.time <= time) result = point;
     else break;
@@ -565,13 +661,18 @@ canvas.addEventListener("mousemove", (event) => {{
   const activeTime = state.minTime + ratio * (state.maxTime - state.minTime);
   const point = nearestPoint(payload.points, activeTime);
   draw(point.time);
-  const highRecord = lastRecordAtOrBefore(payload.recordHighs, point.time);
-  const lowRecord = lastRecordAtOrBefore(payload.recordLows, point.time);
+  const latestTurn = lastPointAtOrBefore(payload.turningPoints, point.time);
+  const latestHigh = lastPointAtOrBefore(payload.turningHighs, point.time);
+  const latestLow = lastPointAtOrBefore(payload.turningLows, point.time);
+  const turnText = latestTurn ? `${{latestTurn.point_type}}：${{latestTurn.trade_date}} / ${{fmt.format(latestTurn.close)}}` : "暂无";
+  const highText = latestHigh ? `${{latestHigh.trade_date}} / ${{fmt.format(latestHigh.close)}}` : "暂无";
+  const lowText = latestLow ? `${{latestLow.trade_date}} / ${{fmt.format(latestLow.close)}}` : "暂无";
   tip.innerHTML = `
     <strong>${{point.trade_date}}</strong><br>
     收盘：${{fmt.format(point.close)}}<br>
-    <span style="color:#b45f06">截至当日新高线：</span>${{highRecord.trade_date}} / ${{fmt.format(highRecord.close)}}<br>
-    <span style="color:#275f9f">截至当日新低线：</span>${{lowRecord.trade_date}} / ${{fmt.format(lowRecord.close)}}
+    <span style="color:#3d4752">上一拐点：</span>${{turnText}}<br>
+    <span style="color:#b45f06">上一高点：</span>${{highText}}<br>
+    <span style="color:#275f9f">上一低点：</span>${{lowText}}
   `;
   tip.style.display = "block";
   tip.style.left = `${{Math.min(canvas.clientWidth - 380, Math.max(12, mx + 16))}}px`;
@@ -593,7 +694,7 @@ resizeCanvas();
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="显示 480092.CNI 新高新低标记折线图。")
+    parser = argparse.ArgumentParser(description="显示 480092.CNI 波段拐点标记折线图。")
     parser.add_argument("--env-file", default=".env", help="可选环境文件。默认 .env。")
     parser.add_argument("--output-dir", default="output", help="输出目录。默认 output。")
     parser.add_argument("--code", default=DEFAULT_CODE, help="指数代码。默认 480092.CNI。")
@@ -611,7 +712,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     series = fetch_index_series(args.code, args.start_date, args.end_date)
-    series.data, records = add_record_flags(series.data)
+    series.data, records = add_turning_point_flags(series.data)
 
     daily_csv_path = output_dir / f"{series.code.replace('.', '_')}_daily.csv"
     records_csv_path = output_dir / f"{series.code.replace('.', '_')}_record_points.csv"
@@ -627,16 +728,16 @@ def main() -> int:
 
     first = series.data.iloc[0]
     last = series.data.iloc[-1]
-    high_count = int(series.data["record_high"].sum())
-    low_count = int(series.data["record_low"].sum())
-    print(f"已生成 {series.code} 新高新低折线图：")
+    high_count = int(series.data["turning_high"].sum())
+    low_count = int(series.data["turning_low"].sum())
+    print(f"已生成 {series.code} 波段拐点折线图：")
     print(f"- 数据范围：{first['trade_date']} 至 {last['trade_date']}，共 {len(series.data)} 条")
     print(f"- 最新收盘：{last['close']:.4f}")
-    print(f"- 新高记录点：{high_count} 个；新低记录点：{low_count} 个")
+    print(f"- 拐点总数：{len(records)} 个；高点：{high_count} 个；低点：{low_count} 个")
     print(f"HTML：{html_path.resolve()}")
     print(f"当前浏览器旧路径也已覆盖：{legacy_html_path.resolve()}")
     print(f"日线 CSV：{daily_csv_path.resolve()}")
-    print(f"记录点 CSV：{records_csv_path.resolve()}")
+    print(f"拐点 CSV：{records_csv_path.resolve()}")
 
     if not args.no_open:
         webbrowser.open(html_path.resolve().as_uri())

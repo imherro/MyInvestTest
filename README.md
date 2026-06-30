@@ -49,17 +49,18 @@ pip install -r requirements.txt
 python scripts/plot_free_cash_flow_index.py
 ```
 
-程序默认只绘制 `480092.CNI` 国证自由现金流全收益指数，并在收盘价曲线上逐日标记所有历史新高和历史新低记录点：
+程序默认只绘制 `480092.CNI` 国证自由现金流全收益指数，并在收盘价曲线上标记高低交替的波段拐点：
 
 - 主曲线：`480092.CNI` 收盘价
-- 历史新高折线：所有刷新历史最高收盘价的点
-- 历史新低折线：所有刷新历史最低收盘价的点
-- 首日作为新高和新低的共同基准点
+- 拐点折线：按时间连接有效高拐点和有效低拐点
+- 有效高拐点：候选高点必须高于前一个有效高点才确认
+- 有效低拐点：候选低点必须低于前一个有效低点才确认
+- 未突破前一个同类拐点时，只更新当前趋势的末端极值，不新增拐点
 
 输出文件在 `output/`：
 
-- `480092_CNI_new_high_low.html`：新高/新低标记折线图
-- `480092_CNI_daily.csv`：日线数据，含 `record_high` 和 `record_low` 标记列
-- `480092_CNI_record_points.csv`：所有新高和新低记录点
+- `480092_CNI_new_high_low.html`：波段拐点标记折线图
+- `480092_CNI_daily.csv`：日线数据，含 `turning_high` 和 `turning_low` 标记列
+- `480092_CNI_record_points.csv`：所有波段拐点记录点
 
 为兼容旧浏览器路径，程序也会覆盖生成 `a_share_free_cash_flow_total_return.html` 和 `a_share_free_cash_flow_total_return.csv`。
