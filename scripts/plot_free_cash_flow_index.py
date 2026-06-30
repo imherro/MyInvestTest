@@ -205,6 +205,33 @@ def add_turning_point_flags(data: pd.DataFrame, reversal_threshold: float) -> tu
         last_type = "high" if trend > 0 else "low"
         add_pivot(last_idx, last_type, "末段高拐点" if trend > 0 else "末段低拐点")
 
+    def keep_only_higher_highs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        filtered: list[dict[str, Any]] = []
+        last_high_close: float | None = None
+        skip_next_low = False
+
+        for pivot in items:
+            turning_type = pivot["turning_type"]
+            if turning_type == "high":
+                close = float(pivot["close"])
+                if last_high_close is None or close > last_high_close:
+                    filtered.append(pivot)
+                    last_high_close = close
+                    skip_next_low = False
+                else:
+                    skip_next_low = True
+                continue
+
+            if turning_type == "low" and skip_next_low:
+                skip_next_low = False
+                continue
+
+            filtered.append(pivot)
+
+        return filtered
+
+    pivots = keep_only_higher_highs(pivots)
+
     def normalize_point_type(pivot: dict[str, Any]) -> str:
         point_type = str(pivot["point_type"])
         turning_type = pivot["turning_type"]
@@ -244,7 +271,7 @@ def fetch_index_series(code: str, start_date: str, end_date: str, reversal_thres
         name=DEFAULT_NAME if code == DEFAULT_CODE else code,
         source="国证官网 getIndexDailyDataWithDataFormat",
         data=data,
-        note=f"拐点按收盘价 ZigZag 规则确认：上升段持续更新最高点，回撤达到 {threshold_pct_text} 后确认高拐点；下降段持续更新最低点，反弹达到 {threshold_pct_text} 后确认低拐点；末段显示当前段极值。",
+        note=f"拐点按收盘价 ZigZag 规则确认：上升段持续更新最高点，回撤达到 {threshold_pct_text} 后形成候选高拐点，且必须高于前一个有效高拐点才保留；下降段持续更新最低点，反弹达到 {threshold_pct_text} 后确认低拐点；末段显示当前段极值。",
     )
 
 
