@@ -8,38 +8,16 @@ import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import pandas as pd
 import requests
-import tushare as ts
 
 
 TODAY = datetime.now().strftime("%Y%m%d")
-
-DEFAULT_CODES = ("932365.CSI", "480092.CNI")
-KNOWN_INDEXES = {
-    "932365.CSI": {
-        "name": "中证全指自由现金流指数",
-        "market": "CSI",
-        "base_date": "20131231",
-        "publisher": "中证指数有限公司",
-        "preferred_source": "tushare",
-    },
-    "480092.CNI": {
-        "name": "国证自由现金流全收益指数",
-        "market": "CNI",
-        "base_date": "20121231",
-        "publisher": "深圳证券信息有限公司",
-        "preferred_source": "cnindex",
-        "cnindex_code": "480092",
-    },
-}
-
-COLORS = {
-    "932365.CSI": "#1f7a68",
-    "480092.CNI": "#b14b36",
-}
+DEFAULT_CODE = "480092.CNI"
+DEFAULT_CNINDEX_CODE = "480092"
+DEFAULT_NAME = "国证自由现金流全收益指数"
 
 
 @dataclass
@@ -48,8 +26,7 @@ class IndexSeries:
     name: str
     source: str
     data: pd.DataFrame
-    base_date: str = ""
-    publisher: str = ""
+    base_date: str = "20121231"
     note: str = ""
 
 
@@ -67,27 +44,6 @@ def load_env_file(env_path: Path) -> None:
             os.environ[key] = value
 
 
-def get_tushare_token() -> str:
-    for key in ("TUSHARE_TOKEN", "TS_TOKEN", "TUSHARE_KEY"):
-        token = os.environ.get(key)
-        if token:
-            return token
-    raise RuntimeError("没有找到 Tushare token。请在 .env 里设置 TUSHARE_TOKEN=你的token。")
-
-
-def tushare_client() -> Any:
-    ts.set_token(get_tushare_token())
-    return ts.pro_api()
-
-
-def parse_yyyymmdd(value: str) -> datetime:
-    return datetime.strptime(value, "%Y%m%d")
-
-
-def yyyymmdd(value: datetime) -> str:
-    return value.strftime("%Y%m%d")
-
-
 def normalize_trade_date(value: Any) -> str:
     text = str(value)
     if len(text) == 8 and text.isdigit():
@@ -95,65 +51,18 @@ def normalize_trade_date(value: Any) -> str:
     return pd.to_datetime(value).strftime("%Y-%m-%d")
 
 
-def chunk_date_ranges(start_date: str, end_date: str, years: int = 5) -> Iterable[tuple[str, str]]:
-    start = parse_yyyymmdd(start_date)
-    end = parse_yyyymmdd(end_date)
-    cursor = start
-    while cursor <= end:
-        chunk_end = min(datetime(cursor.year + years, 1, 1) - pd.Timedelta(days=1), end)
-        yield yyyymmdd(cursor), yyyymmdd(chunk_end)
-        cursor = chunk_end + pd.Timedelta(days=1)
-
-
-def normalize_tushare_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame is None or frame.empty or "trade_date" not in frame.columns or "close" not in frame.columns:
-        return pd.DataFrame()
-    data = frame.copy()
-    data["trade_date"] = data["trade_date"].map(normalize_trade_date)
-    for col in ("open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"):
-        if col in data.columns:
-            data[col] = pd.to_numeric(data[col], errors="coerce")
-    data = data.dropna(subset=["trade_date", "close"])
-    data = data.sort_values("trade_date").drop_duplicates("trade_date", keep="last")
-    return data
-
-
-def fetch_tushare_daily(pro: Any, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-    chunks: list[pd.DataFrame] = []
-    for chunk_start, chunk_end in chunk_date_ranges(start_date, end_date):
-        frame = pro.index_daily(ts_code=code, start_date=chunk_start, end_date=chunk_end)
-        if frame is not None and not frame.empty:
-            chunks.append(frame.dropna(axis=1, how="all"))
-    if not chunks:
-        return pd.DataFrame()
-    return normalize_tushare_frame(pd.concat(chunks, ignore_index=True))
-
-
-def fetch_tushare_metadata(pro: Any, code: str, fallback: dict[str, str]) -> dict[str, str]:
-    market = fallback.get("market", "")
-    fields = "ts_code,name,market,publisher,category,base_date,list_date"
-    if market:
-        frame = pro.index_basic(market=market, fields=fields)
-        if frame is not None and not frame.empty:
-            hit = frame[frame["ts_code"].eq(code)]
-            if not hit.empty:
-                row = hit.iloc[0]
-                return {
-                    "name": fallback.get("name") or str(row.get("name", "")),
-                    "market": str(row.get("market", "")),
-                    "publisher": str(row.get("publisher", "")),
-                    "category": str(row.get("category", "")),
-                    "base_date": "" if pd.isna(row.get("base_date", "")) else str(row.get("base_date", "")),
-                    "list_date": "" if pd.isna(row.get("list_date", "")) else str(row.get("list_date", "")),
-                }
-    return {
-        "name": fallback.get("name", code),
-        "market": fallback.get("market", ""),
-        "publisher": fallback.get("publisher", ""),
-        "category": "",
-        "base_date": fallback.get("base_date", ""),
-        "list_date": "",
-    }
+def parse_percent(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("%"):
+        text = text[:-1]
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def fetch_cnindex_daily(index_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -195,128 +104,155 @@ def fetch_cnindex_daily(index_code: str, start_date: str, end_date: str) -> pd.D
                 "vol": row[9],
             }
         )
+
     data = pd.DataFrame(parsed)
     if data.empty:
         return data
+
     for col in ("open", "high", "low", "close", "change", "pct_chg", "amount", "vol"):
         data[col] = pd.to_numeric(data[col], errors="coerce")
-    return data.dropna(subset=["trade_date", "close"]).sort_values("trade_date").drop_duplicates("trade_date")
-
-
-def parse_percent(value: Any) -> float | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if text.endswith("%"):
-        text = text[:-1]
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def fetch_index_series(pro: Any, code: str, start_date: str, end_date: str) -> IndexSeries:
-    fallback = KNOWN_INDEXES.get(code, {"name": code, "market": code.split(".")[-1] if "." in code else ""})
-    metadata = fetch_tushare_metadata(pro, code, fallback)
-    preferred_source = fallback.get("preferred_source", "tushare")
-
-    if preferred_source == "cnindex":
-        cn_code = fallback.get("cnindex_code", code.split(".")[0])
-        try:
-            data = fetch_cnindex_daily(cn_code, start_date, end_date)
-            if not data.empty:
-                return IndexSeries(
-                    code=code,
-                    name=metadata["name"],
-                    source="国证官网 getIndexDailyDataWithDataFormat",
-                    data=data,
-                    base_date=metadata.get("base_date", ""),
-                    publisher=metadata.get("publisher", ""),
-                    note="国证官网接口返回完整日线，优先于 Tushare 的较短 CNI 序列。",
-                )
-        except Exception as exc:
-            print(f"国证官网 {code} 查询失败，改用 Tushare：{exc}", file=sys.stderr)
-
-    data = fetch_tushare_daily(pro, code, start_date, end_date)
-    if data.empty:
-        raise RuntimeError(f"{code} 没有可用日线数据。")
-    return IndexSeries(
-        code=code,
-        name=metadata["name"],
-        source="Tushare index_daily",
-        data=data,
-        base_date=metadata.get("base_date", ""),
-        publisher=metadata.get("publisher", ""),
-        note="Tushare index_daily 返回日线。",
-    )
+    data = data.dropna(subset=["trade_date", "close"])
+    data = data.sort_values("trade_date").drop_duplicates("trade_date", keep="last")
+    return data.reset_index(drop=True)
 
 
 def filter_by_date(data: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
     start = normalize_trade_date(start_date)
     end = normalize_trade_date(end_date)
-    return data[(data["trade_date"] >= start) & (data["trade_date"] <= end)].copy()
+    return data[(data["trade_date"] >= start) & (data["trade_date"] <= end)].copy().reset_index(drop=True)
 
 
-def write_series_csv(series: IndexSeries, output_dir: Path) -> Path:
-    path = output_dir / f"{series.code.replace('.', '_')}_daily.csv"
-    cols = [col for col in ("trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount") if col in series.data.columns]
-    series.data[cols].to_csv(path, index=False, encoding="utf-8-sig")
-    return path
+def add_record_flags(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    data = data.copy()
+    high_records: list[dict[str, Any]] = []
+    low_records: list[dict[str, Any]] = []
+    record_high = float("-inf")
+    record_low = float("inf")
+    high_seq = 0
+    low_seq = 0
+
+    data["record_high"] = False
+    data["record_low"] = False
+
+    for idx, row in data.iterrows():
+        close = float(row["close"])
+        is_first = idx == 0
+        if is_first or close > record_high:
+            high_seq += 1
+            record_high = close
+            data.at[idx, "record_high"] = True
+            high_records.append(
+                {
+                    "record_type": "新高" if not is_first else "起点/新高基准",
+                    "sequence": high_seq,
+                    "trade_date": row["trade_date"],
+                    "close": close,
+                }
+            )
+        if is_first or close < record_low:
+            low_seq += 1
+            record_low = close
+            data.at[idx, "record_low"] = True
+            low_records.append(
+                {
+                    "record_type": "新低" if not is_first else "起点/新低基准",
+                    "sequence": low_seq,
+                    "trade_date": row["trade_date"],
+                    "close": close,
+                }
+            )
+
+    records = pd.DataFrame(high_records + low_records)
+    records = records.sort_values(["trade_date", "record_type", "sequence"]).reset_index(drop=True)
+    return data, records
 
 
-def write_wide_csv(series_list: list[IndexSeries], output_path: Path) -> None:
-    merged: pd.DataFrame | None = None
-    for series in series_list:
-        frame = series.data[["trade_date", "close"]].rename(columns={"close": series.code})
-        merged = frame if merged is None else merged.merge(frame, on="trade_date", how="outer")
-    assert merged is not None
-    merged.sort_values("trade_date").to_csv(output_path, index=False, encoding="utf-8-sig")
+def fetch_index_series(code: str, start_date: str, end_date: str) -> IndexSeries:
+    cnindex_code = code.split(".")[0] if code.endswith(".CNI") else DEFAULT_CNINDEX_CODE
+    data = fetch_cnindex_daily(cnindex_code, start_date, end_date)
+    data = filter_by_date(data, start_date, end_date)
+    if data.empty:
+        raise RuntimeError(f"{code} 按日期过滤后没有数据。")
+    data, _ = add_record_flags(data)
+    return IndexSeries(
+        code=code,
+        name=DEFAULT_NAME if code == DEFAULT_CODE else code,
+        source="国证官网 getIndexDailyDataWithDataFormat",
+        data=data,
+        note="历史新高/新低按收盘点位逐日严格刷新计算，首日作为新高和新低的共同基准点。",
+    )
 
 
-def build_chart_payload(series_list: list[IndexSeries]) -> dict[str, Any]:
-    payload_series = []
-    for index, series in enumerate(series_list):
-        points = series.data[["trade_date", "close"]].to_dict(orient="records")
-        first = points[0]
-        last = points[-1]
-        total_return = (last["close"] / first["close"] - 1) * 100
-        payload_series.append(
-            {
-                "code": series.code,
-                "name": series.name,
-                "source": series.source,
-                "baseDate": series.base_date,
-                "publisher": series.publisher,
-                "note": series.note,
-                "color": COLORS.get(series.code, ["#1f7a68", "#b14b36", "#4b5f9f", "#8a6d2f"][index % 4]),
-                "first": first,
-                "last": last,
-                "rows": len(points),
-                "totalReturn": total_return,
-                "points": points,
-            }
+def write_daily_csv(series: IndexSeries, output_path: Path) -> None:
+    cols = [
+        col
+        for col in (
+            "trade_date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "change",
+            "pct_chg",
+            "vol",
+            "amount",
+            "record_high",
+            "record_low",
         )
-    return {"series": payload_series}
+        if col in series.data.columns
+    ]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    series.data[cols].to_csv(output_path, index=False, encoding="utf-8-sig")
+
+
+def write_record_csv(records: pd.DataFrame, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    records.to_csv(output_path, index=False, encoding="utf-8-sig")
 
 
 def safe_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False).replace("</", "<\\/")
 
 
-def write_html(series_list: list[IndexSeries], output_path: Path) -> None:
-    payload = build_chart_payload(series_list)
-    all_start = min(item["first"]["trade_date"] for item in payload["series"])
-    all_end = max(item["last"]["trade_date"] for item in payload["series"])
-    subtitle_names = " 与 ".join(f"{series.name}（{series.code}）" for series in series_list)
+def chart_payload(series: IndexSeries, records: pd.DataFrame) -> dict[str, Any]:
+    data = series.data
+    points = data[["trade_date", "close"]].to_dict(orient="records")
+    record_highs = data[data["record_high"]][["trade_date", "close"]].to_dict(orient="records")
+    record_lows = data[data["record_low"]][["trade_date", "close"]].to_dict(orient="records")
+    first = points[0]
+    last = points[-1]
+    all_time_high = max(points, key=lambda item: item["close"])
+    all_time_low = min(points, key=lambda item: item["close"])
+    total_return = (last["close"] / first["close"] - 1) * 100
+    return {
+        "code": series.code,
+        "name": series.name,
+        "source": series.source,
+        "baseDate": series.base_date,
+        "note": series.note,
+        "first": first,
+        "last": last,
+        "rows": len(points),
+        "totalReturn": total_return,
+        "allTimeHigh": all_time_high,
+        "allTimeLow": all_time_low,
+        "recordHighCount": len(record_highs),
+        "recordLowCount": len(record_lows),
+        "recordRows": records.to_dict(orient="records"),
+        "points": points,
+        "recordHighs": record_highs,
+        "recordLows": record_lows,
+    }
 
+
+def write_html(series: IndexSeries, records: pd.DataFrame, output_path: Path) -> None:
+    payload = chart_payload(series, records)
     html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>自由现金流指数对比</title>
+  <title>{series.name}新高新低标记</title>
   <style>
     :root {{
       color-scheme: light;
@@ -325,6 +261,9 @@ def write_html(series_list: list[IndexSeries], output_path: Path) -> None:
       --line: #d8dee8;
       --panel: #ffffff;
       --bg: #f5f7f9;
+      --main: #1f7a68;
+      --record-high: #b45f06;
+      --record-low: #275f9f;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -351,43 +290,47 @@ def write_html(series_list: list[IndexSeries], output_path: Path) -> None:
     }}
     .stats {{
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 10px;
       margin: 16px 0;
     }}
     .stat {{
+      min-height: 86px;
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 12px 14px;
-      min-height: 112px;
     }}
-    .stat-title {{
-      display: flex;
-      gap: 8px;
-      align-items: center;
+    .label {{
+      display: block;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .value {{
+      display: block;
+      font-size: 18px;
       font-weight: 700;
-      margin-bottom: 10px;
+      white-space: nowrap;
+    }}
+    .legend {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .legend span {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
     }}
     .swatch {{
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
+      width: 22px;
+      height: 3px;
+      border-radius: 999px;
       display: inline-block;
-    }}
-    .stat-grid {{
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 8px;
-      font-size: 13px;
-      color: var(--muted);
-    }}
-    .stat-grid strong {{
-      display: block;
-      margin-top: 4px;
-      color: var(--ink);
-      font-size: 16px;
-      white-space: nowrap;
     }}
     .chart-shell {{
       position: relative;
@@ -406,7 +349,7 @@ def write_html(series_list: list[IndexSeries], output_path: Path) -> None:
       position: absolute;
       display: none;
       min-width: 230px;
-      max-width: 340px;
+      max-width: 360px;
       padding: 8px 10px;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -423,15 +366,15 @@ def write_html(series_list: list[IndexSeries], output_path: Path) -> None:
       line-height: 1.7;
     }}
     .notes p {{ margin: 4px 0; }}
-    @media (max-width: 860px) {{
+    @media (max-width: 980px) {{
       .stats {{
-        grid-template-columns: 1fr;
-      }}
-      .stat-grid {{
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }}
       canvas {{
         min-height: 360px;
+      }}
+      .value {{
+        font-size: 16px;
       }}
     }}
   </style>
@@ -439,12 +382,17 @@ def write_html(series_list: list[IndexSeries], output_path: Path) -> None:
 <body>
 <main>
   <header>
-    <h1>自由现金流指数对比</h1>
-    <p class="subtitle">{subtitle_names} · {all_start} 至 {all_end} · 点位口径，各自基日为 1000</p>
+    <h1>{series.name}（{series.code}）</h1>
+    <p class="subtitle">收盘价曲线 + 历史新高折线 + 历史新低折线 · {payload["first"]["trade_date"]} 至 {payload["last"]["trade_date"]}</p>
   </header>
   <section class="stats" id="stats" aria-label="指数统计"></section>
+  <div class="legend">
+    <span><i class="swatch" style="background: var(--main)"></i>收盘价</span>
+    <span><i class="swatch" style="background: var(--record-high)"></i>历史新高记录点连线</span>
+    <span><i class="swatch" style="background: var(--record-low)"></i>历史新低记录点连线</span>
+  </div>
   <section class="chart-shell">
-    <canvas id="chart" aria-label="自由现金流指数折线图"></canvas>
+    <canvas id="chart" aria-label="{series.name}新高新低折线图"></canvas>
     <div class="tooltip" id="tooltip"></div>
   </section>
   <section class="notes" id="notes" aria-label="数据说明"></section>
@@ -458,25 +406,23 @@ const ctx = canvas.getContext("2d");
 const fmt = new Intl.NumberFormat("zh-CN", {{ maximumFractionDigits: 2 }});
 const pct = new Intl.NumberFormat("zh-CN", {{ maximumFractionDigits: 2, minimumFractionDigits: 2 }});
 
-for (const series of payload.series) {{
-  series.points = series.points.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
-}}
+payload.points = payload.points.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
+payload.recordHighs = payload.recordHighs.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
+payload.recordLows = payload.recordLows.map((p) => ({{ ...p, time: Date.parse(p.trade_date + "T00:00:00Z") }}));
 
-document.getElementById("stats").innerHTML = payload.series.map((series) => `
-  <article class="stat">
-    <div class="stat-title"><span class="swatch" style="background:${{series.color}}"></span>${{series.name}}（${{series.code}}）</div>
-    <div class="stat-grid">
-      <span>数据起点<strong>${{series.first.trade_date}}</strong></span>
-      <span>最新日期<strong>${{series.last.trade_date}}</strong></span>
-      <span>最新点位<strong>${{fmt.format(series.last.close)}}</strong></span>
-      <span>区间涨幅<strong>${{pct.format(series.totalReturn)}}%</strong></span>
-    </div>
-  </article>
-`).join("");
+document.getElementById("stats").innerHTML = `
+  <div class="stat"><span class="label">最新点位</span><span class="value">${{fmt.format(payload.last.close)}}</span></div>
+  <div class="stat"><span class="label">区间涨幅</span><span class="value">${{pct.format(payload.totalReturn)}}%</span></div>
+  <div class="stat"><span class="label">新高记录点</span><span class="value">${{payload.recordHighCount}}</span></div>
+  <div class="stat"><span class="label">新低记录点</span><span class="value">${{payload.recordLowCount}}</span></div>
+  <div class="stat"><span class="label">最高收盘</span><span class="value">${{fmt.format(payload.allTimeHigh.close)}}</span></div>
+  <div class="stat"><span class="label">最低收盘</span><span class="value">${{fmt.format(payload.allTimeLow.close)}}</span></div>
+`;
 
-document.getElementById("notes").innerHTML = payload.series.map((series) => `
-  <p>${{series.code}}：${{series.source}}，${{series.rows}} 条；基日 ${{series.baseDate || "未知"}}。${{series.note}}</p>
-`).join("");
+document.getElementById("notes").innerHTML = `
+  <p>${{payload.source}}，共 ${{payload.rows}} 条日线；基日 ${{payload.baseDate}}。</p>
+  <p>${{payload.note}}</p>
+`;
 
 function extent(values) {{
   return [Math.min(...values), Math.max(...values)];
@@ -491,8 +437,38 @@ function resizeCanvas() {{
   draw();
 }}
 
-function allPoints() {{
-  return payload.series.flatMap((series) => series.points);
+function drawLine(points, x, y, color, width, markerKind = null) {{
+  if (!points.length) return;
+  ctx.beginPath();
+  points.forEach((point, index) => {{
+    const xx = x(point.time);
+    const yy = y(point.close);
+    if (index === 0) ctx.moveTo(xx, yy);
+    else ctx.lineTo(xx, yy);
+  }});
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.stroke();
+  if (!markerKind) return;
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.2;
+  for (const point of points) {{
+    const xx = x(point.time);
+    const yy = y(point.close);
+    ctx.beginPath();
+    if (markerKind === "diamond") {{
+      ctx.moveTo(xx, yy - 4);
+      ctx.lineTo(xx + 4, yy);
+      ctx.lineTo(xx, yy + 4);
+      ctx.lineTo(xx - 4, yy);
+      ctx.closePath();
+    }} else {{
+      ctx.arc(xx, yy, 3.4, 0, Math.PI * 2);
+    }}
+    ctx.fill();
+    ctx.stroke();
+  }}
 }}
 
 function draw(activeTime = null) {{
@@ -501,9 +477,8 @@ function draw(activeTime = null) {{
   const margin = {{ left: 64, right: 24, top: 28, bottom: 46 }};
   const plotW = width - margin.left - margin.right;
   const plotH = height - margin.top - margin.bottom;
-  const points = allPoints();
-  const [minTime, maxTime] = extent(points.map((p) => p.time));
-  const [minValue, maxValue] = extent(points.map((p) => p.close));
+  const [minTime, maxTime] = extent(payload.points.map((p) => p.time));
+  const [minValue, maxValue] = extent(payload.points.map((p) => p.close));
   const pad = (maxValue - minValue) * 0.08 || 1;
   const lo = minValue - pad;
   const hi = maxValue + pad;
@@ -539,33 +514,22 @@ function draw(activeTime = null) {{
     ctx.fillText(label, x(time), height - margin.bottom + 18);
   }}
 
-  for (const series of payload.series) {{
-    ctx.beginPath();
-    series.points.forEach((point, index) => {{
-      const xx = x(point.time);
-      const yy = y(point.close);
-      if (index === 0) ctx.moveTo(xx, yy);
-      else ctx.lineTo(xx, yy);
-    }});
-    ctx.strokeStyle = series.color;
-    ctx.lineWidth = 2.4;
-    ctx.stroke();
-  }}
+  drawLine(payload.points, x, y, "#1f7a68", 2.2);
+  drawLine(payload.recordHighs, x, y, "#b45f06", 1.8, "circle");
+  drawLine(payload.recordLows, x, y, "#275f9f", 1.8, "diamond");
 
   if (activeTime !== null) {{
+    const nearest = nearestPoint(payload.points, activeTime);
     ctx.strokeStyle = "#9aa5b2";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(x(activeTime), margin.top);
-    ctx.lineTo(x(activeTime), height - margin.bottom);
+    ctx.moveTo(x(nearest.time), margin.top);
+    ctx.lineTo(x(nearest.time), height - margin.bottom);
     ctx.stroke();
-    for (const series of payload.series) {{
-      const nearest = nearestPoint(series.points, activeTime);
-      ctx.fillStyle = series.color;
-      ctx.beginPath();
-      ctx.arc(x(nearest.time), y(nearest.close), 4, 0, Math.PI * 2);
-      ctx.fill();
-    }}
+    ctx.fillStyle = "#17202a";
+    ctx.beginPath();
+    ctx.arc(x(nearest.time), y(nearest.close), 4, 0, Math.PI * 2);
+    ctx.fill();
   }}
 
   return {{ margin, plotW, minTime, maxTime, x, y }};
@@ -584,20 +548,33 @@ function nearestPoint(points, time) {{
   return best;
 }}
 
+function lastRecordAtOrBefore(points, time) {{
+  let result = points[0];
+  for (const point of points) {{
+    if (point.time <= time) result = point;
+    else break;
+  }}
+  return result;
+}}
+
 canvas.addEventListener("mousemove", (event) => {{
   const rect = canvas.getBoundingClientRect();
   const state = draw();
   const mx = event.clientX - rect.left;
   const ratio = Math.max(0, Math.min(1, (mx - state.margin.left) / Math.max(1, state.plotW)));
   const activeTime = state.minTime + ratio * (state.maxTime - state.minTime);
-  draw(activeTime);
-  const rows = payload.series.map((series) => {{
-    const point = nearestPoint(series.points, activeTime);
-    return `<div><span style="color:${{series.color}}">●</span> ${{series.code}} ${{point.trade_date}}：${{fmt.format(point.close)}}</div>`;
-  }}).join("");
-  tip.innerHTML = rows;
+  const point = nearestPoint(payload.points, activeTime);
+  draw(point.time);
+  const highRecord = lastRecordAtOrBefore(payload.recordHighs, point.time);
+  const lowRecord = lastRecordAtOrBefore(payload.recordLows, point.time);
+  tip.innerHTML = `
+    <strong>${{point.trade_date}}</strong><br>
+    收盘：${{fmt.format(point.close)}}<br>
+    <span style="color:#b45f06">截至当日新高线：</span>${{highRecord.trade_date}} / ${{fmt.format(highRecord.close)}}<br>
+    <span style="color:#275f9f">截至当日新低线：</span>${{lowRecord.trade_date}} / ${{fmt.format(lowRecord.close)}}
+  `;
   tip.style.display = "block";
-  tip.style.left = `${{Math.min(canvas.clientWidth - 360, Math.max(12, mx + 16))}}px`;
+  tip.style.left = `${{Math.min(canvas.clientWidth - 380, Math.max(12, mx + 16))}}px`;
   tip.style.top = `${{Math.max(12, event.clientY - rect.top - 20)}}px`;
 }});
 
@@ -616,10 +593,10 @@ resizeCanvas();
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="显示自由现金流指数折线图。")
-    parser.add_argument("--env-file", default=".env", help="包含 TUSHARE_TOKEN 的环境文件。默认 .env。")
+    parser = argparse.ArgumentParser(description="显示 480092.CNI 新高新低标记折线图。")
+    parser.add_argument("--env-file", default=".env", help="可选环境文件。默认 .env。")
     parser.add_argument("--output-dir", default="output", help="输出目录。默认 output。")
-    parser.add_argument("--codes", default=",".join(DEFAULT_CODES), help="逗号分隔的指数代码。默认 932365.CSI,480092.CNI。")
+    parser.add_argument("--code", default=DEFAULT_CODE, help="指数代码。默认 480092.CNI。")
     parser.add_argument("--start-date", default="20121231", help="开始日期，格式 YYYYMMDD。默认 20121231。")
     parser.add_argument("--end-date", default=TODAY, help="结束日期，格式 YYYYMMDD。")
     parser.add_argument("--no-open", action="store_true", help="生成后不自动打开 HTML。")
@@ -630,43 +607,36 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     load_env_file(Path(args.env_file))
 
-    pro = tushare_client()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    codes = [code.strip() for code in args.codes.split(",") if code.strip()]
-    series_list: list[IndexSeries] = []
-    for code in codes:
-        series = fetch_index_series(pro, code, args.start_date, args.end_date)
-        series.data = filter_by_date(series.data, args.start_date, args.end_date)
-        if series.data.empty:
-            raise RuntimeError(f"{code} 按日期过滤后没有数据。")
-        series_list.append(series)
+    series = fetch_index_series(args.code, args.start_date, args.end_date)
+    series.data, records = add_record_flags(series.data)
 
-    csv_paths = [write_series_csv(series, output_dir) for series in series_list]
-    wide_csv_path = output_dir / "free_cash_flow_indices.csv"
-    write_wide_csv(series_list, wide_csv_path)
-
-    html_path = output_dir / "free_cash_flow_indices.html"
+    daily_csv_path = output_dir / f"{series.code.replace('.', '_')}_daily.csv"
+    records_csv_path = output_dir / f"{series.code.replace('.', '_')}_record_points.csv"
+    html_path = output_dir / f"{series.code.replace('.', '_')}_new_high_low.html"
     legacy_html_path = output_dir / "a_share_free_cash_flow_total_return.html"
     legacy_csv_path = output_dir / "a_share_free_cash_flow_total_return.csv"
-    write_html(series_list, html_path)
-    write_html(series_list, legacy_html_path)
-    write_wide_csv(series_list, legacy_csv_path)
 
-    print("已生成自由现金流指数对比图：")
-    for series in series_list:
-        first = series.data.iloc[0]
-        last = series.data.iloc[-1]
-        print(
-            f"- {series.code} {series.name}：{series.source}，"
-            f"{first['trade_date']} 至 {last['trade_date']}，{len(series.data)} 条，最新 {last['close']:.2f}"
-        )
+    write_daily_csv(series, daily_csv_path)
+    write_daily_csv(series, legacy_csv_path)
+    write_record_csv(records, records_csv_path)
+    write_html(series, records, html_path)
+    write_html(series, records, legacy_html_path)
+
+    first = series.data.iloc[0]
+    last = series.data.iloc[-1]
+    high_count = int(series.data["record_high"].sum())
+    low_count = int(series.data["record_low"].sum())
+    print(f"已生成 {series.code} 新高新低折线图：")
+    print(f"- 数据范围：{first['trade_date']} 至 {last['trade_date']}，共 {len(series.data)} 条")
+    print(f"- 最新收盘：{last['close']:.4f}")
+    print(f"- 新高记录点：{high_count} 个；新低记录点：{low_count} 个")
     print(f"HTML：{html_path.resolve()}")
     print(f"当前浏览器旧路径也已覆盖：{legacy_html_path.resolve()}")
-    print(f"合并 CSV：{wide_csv_path.resolve()}")
-    for path in csv_paths:
-        print(f"单指数 CSV：{path.resolve()}")
+    print(f"日线 CSV：{daily_csv_path.resolve()}")
+    print(f"记录点 CSV：{records_csv_path.resolve()}")
 
     if not args.no_open:
         webbrowser.open(html_path.resolve().as_uri())

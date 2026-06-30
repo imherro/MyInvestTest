@@ -40,24 +40,26 @@
 
 每完成一次任务后，同步到 GitHub 仓库 `imherro/MyInvestTest`。同步时不要提交 `.env` 或任何本地密钥文件。
 
-## 自由现金流指数图
+## 国证自由现金流全收益指数图
 
-`.env` 中配置 `TUSHARE_TOKEN` 后，运行：
+运行：
 
 ```bash
 pip install -r requirements.txt
 python scripts/plot_free_cash_flow_index.py
 ```
 
-程序默认对比两个 A 股自由现金流指数：
+程序默认只绘制 `480092.CNI` 国证自由现金流全收益指数，并在收盘价曲线上逐日标记所有历史新高和历史新低记录点：
 
-- `932365.CSI`：中证全指自由现金流指数，使用 Tushare `index_daily`
-- `480092.CNI`：国证自由现金流全收益指数，优先使用国证官网历史行情接口
+- 主曲线：`480092.CNI` 收盘价
+- 历史新高折线：所有刷新历史最高收盘价的点
+- 历史新低折线：所有刷新历史最低收盘价的点
+- 首日作为新高和新低的共同基准点
 
 输出文件在 `output/`：
 
-- `free_cash_flow_indices.html`：折线对比图
-- `free_cash_flow_indices.csv`：合并行情数据
-- `932365_CSI_daily.csv`、`480092_CNI_daily.csv`：单指数原始行情数据
+- `480092_CNI_new_high_low.html`：新高/新低标记折线图
+- `480092_CNI_daily.csv`：日线数据，含 `record_high` 和 `record_low` 标记列
+- `480092_CNI_record_points.csv`：所有新高和新低记录点
 
 为兼容旧浏览器路径，程序也会覆盖生成 `a_share_free_cash_flow_total_return.html` 和 `a_share_free_cash_flow_total_return.csv`。
